@@ -1,0 +1,46 @@
+from flask import Flask, request, jsonify
+import cv2
+import numpy as np
+import pytesseract
+from gtts import gTTS
+import os
+import pygame
+import io
+
+app = Flask(_name_)
+
+@app.route('/upload', methods=['POST'])
+def upload_image():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+    
+    image_file = request.files['image']
+    img_bytes = image_file.read()
+    
+    # Convert bytes to numpy array
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    # Preprocess image for better OCR
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    
+    # Perform OCR
+    text = pytesseract.image_to_string(thresh)
+    print("Extracted Text:", text)
+    
+    # Convert text to speech
+    tts = gTTS(text=text, lang='en')
+    tts.save("output.mp3")
+    
+    # Play audio
+    pygame.mixer.init()
+    pygame.mixer.music.load("output.mp3")
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        continue
+    
+    return jsonify({'text': text})
+
+if _name_ == '_main_':
+    app.run(host='0.0.0.0', port=5000)

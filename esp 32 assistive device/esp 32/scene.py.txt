@@ -1,0 +1,156 @@
+from flask import Flask, request, jsonify
+import face_recognition
+import cv2
+import numpy as np
+import pickle
+import os
+from gtts import gTTS
+import pygame
+import time
+from transformers import VisionEncoderDecoderModel, ViTFeatureExtractor, AutoTokenizer
+import torch
+from PIL import Image
+import pytesseract
+
+app = Flask(_name_)
+
+# Initialize face recognition database
+FACE_DB = "face_db.pkl"
+known_face_encodings = []
+known_face_names = []
+
+if os.path.exists(FACE_DB):
+    with open(FACE_DB, "rb") as f:
+        known_face_encodings, known_face_names = pickle.load(f)
+
+# Load image captioning model
+caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+feature_extractor = ViTFeatureExtractor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+caption_tokenizer = AutoTokenizer.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+caption_model.to(device)
+
+def text_to_speech(text):
+    tts = gTTS(text=text, lang='en')
+    tts.save("temp.mp3")
+    
+    pygame.mixer.init()
+    pygame.mixer.music.load("temp.mp3")
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        time.sleep(0.1)
+
+@app.route('/describe', methods=['POST'])
+def describe_image():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+    
+    image_file = request.files['image']
+    img_bytes = image_file.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    # Scene description
+    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb_img)
+    
+    pixel_values = feature_extractor(images=[pil_img], return_tensors="pt").pixel_values
+    pixel_values = pixel_values.to(device)
+    
+    output_ids = caption_model.generate(pixel_values, max_length=16, num_beams=4)
+    description = caption_tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    
+    print(f"Scene Description: {description}")
+    text_to_speech(description)
+    
+    return jsonify({'description': description})
+
+@app.route('/recognize', methods=['POST'])
+def recognize_face():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+    
+    image_file = request.files['image']
+    img_bytes = image_file.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    face_locations = face_recognition.face_locations(rgb_img)
+    face_encodings = face_recognition.face_encodings(rgb_img, face_locations)
+    
+    recognized_names = []
+    
+    for face_encoding in face_encodings:
+        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+        name = "Unknown"
+        
+        face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+        best_match_index = np.argmin(face_distances)
+        if matches[best_match_index]:
+            name = known_face_names[best_match_index]
+        
+        recognized_names.append(name)
+    
+    if recognized_names:
+        announcement = "I see " + ", ".join(recognized_names) if len(recognized_names) > 1 else f"I see {recognized_names[0]}"
+        print(f"Face Recognition: {announcement}")
+        text_to_speech(announcement)
+    
+    return jsonify({'recognized': recognized_names})
+
+@app.route('/register', methods=['POST'])
+def register_face():
+    name = request.form.get('name')
+    if not name:
+        return jsonify({'error': 'No name provided'}), 400
+    
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+    
+    image_file = request.files['image']
+    img_bytes = image_file.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    face_encodings = face_recognition.face_encodings(rgb_img)
+    
+    if len(face_encodings) == 0:
+        return jsonify({'error': 'No face detected'}), 400
+    
+    known_face_encodings.append(face_encodings[0])
+    known_face_names.append(name)
+    
+    with open(FACE_DB, "wb") as f:
+        pickle.dump((known_face_encodings, known_face_names), f)
+    
+    print(f"Registered new face: {name}")
+    text_to_speech(f"I've learned what {name} looks like")
+    return jsonify({'success': True, 'name': name})
+
+@app.route('/ocr', methods=['POST'])
+def ocr():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image provided'}), 400
+    
+    image_file = request.files['image']
+    img_bytes = image_file.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    
+    text = pytesseract.image_to_string(thresh)
+    print(f"Extracted Text: {text}")
+    
+    if text.strip():
+        text_to_speech(f"I found text: {text}")
+    else:
+        text_to_speech("I couldn't find any text")
+    
+    return jsonify({'text': text})
+
+if _name_ == '_main_':
+    app.run(host='0.0.0.0', port=5000)
